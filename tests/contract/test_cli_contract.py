@@ -63,3 +63,39 @@ def test_project_init_and_status_round_trip(tmp_path, monkeypatch):
     assert isinstance(status_data.get("recent_runs"), list), (
         f"recent_runs is not a list: {type(status_data.get('recent_runs'))}"
     )
+
+
+def test_workflow_fragment_ls_payload_has_the_fragments_contract(tmp_path):
+    """`workflow_compose(action="list")`'s payload shape, against the real binary.
+
+    The one claim in `workflow_compose` that was read out of comfy-cli's source
+    rather than observed: the mocked unit tests assert the argv, but they assert
+    the payload against a fixture this repo wrote, so a shape drift is invisible
+    there and visible only here.
+
+    `tmp_path` is an EMPTY but EXISTING directory, which comfy-cli answers with a
+    zero-fragment payload — a *missing* lib is a `fragment_lib_not_found` error
+    instead, so passing an existing one keeps this a shape check rather than an
+    error-path check. An empty library is the state a fresh machine is in:
+    comfy-cli bundles no fragments, which is why `action="decompose"` is the
+    documented on-ramp.
+    """
+    data = server.workflow_compose(action="list", lib_dir=str(tmp_path))
+
+    assert "unsupported" not in data, (
+        "the installed comfy-cli has no `workflow fragment` group — it shipped in "
+        f"1.16.0, so this reads as an upstream REMOVAL: {data.get('error')!r}"
+    )
+    assert isinstance(data, dict), f"fragment ls payload drifted: {type(data)}"
+    missing = {"lib", "count", "fragments", "errors"} - set(data)
+    assert not missing, (
+        f"fragment ls payload lost fields workflow_compose documents: {missing} "
+        f"(got {sorted(data)})"
+    )
+    assert isinstance(data["fragments"], list) and isinstance(data["errors"], list), (
+        "fragment ls `fragments`/`errors` are no longer lists: "
+        f"{type(data['fragments'])} / {type(data['errors'])}"
+    )
+    assert data["count"] == 0 and not data["fragments"], (
+        f"an empty lib dir is no longer an empty answer: {data}"
+    )

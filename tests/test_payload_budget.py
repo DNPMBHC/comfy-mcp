@@ -2,7 +2,7 @@
 
 Every MCP session ships every tool description plus INSTRUCTIONS before any
 work happens. After a three-pass docstring diet, the payload is approximately
-15.1k estimated tokens — a fixed tax on every conversation. This test freezes
+15.5k estimated tokens — a fixed tax on every conversation. This test freezes
 a ceiling just above the measured size so growth is a deliberate decision (bump
 the constant in the same PR, with justification), and the ceiling ratchets DOWN
 as further trims land.
@@ -35,7 +35,25 @@ _SERVER_SRC = Path(__file__).resolve().parents[1] / "src" / "comfy_mcp" / "serve
 # than by this change. Measured ~15,112 after it. Deliberately tight — the
 # point of this ceiling is that the next growth is a decision too, not that
 # there is room for one.
-_BUDGET_TOKENS = 15_250
+#
+# 15,250 -> 15,600 for `workflow_compose` (39 -> 40 tools), the first tool here
+# that BUILDS a graph rather than editing an existing one: it wraps comfy-cli
+# 1.16.0's `workflow compose` / `decompose` / `fragment ls|show|validate`.
+# Measured ~15,465 after it, against 137 tokens of headroom before — so the
+# bump is the decision this ceiling exists to force, not an accident.
+#
+# Two things were done to keep it this small, and a reviewer should hold a
+# future authoring change to the same bar:
+#   - ONE grouped tool (`action=...`, the `nodes`/`job`/`download` shape) rather
+#     than five thin ones. Five separate docstrings measured ~+800 tokens
+#     against this one's ~+353; the five verbs share `lib_dir` and a single
+#     workflow, so the grouping is the honest shape as well as the cheap one.
+#   - INSTRUCTIONS deliberately UNTOUCHED (its own module comment says "keep
+#     this short"). The library-bootstrap story — comfy-cli ships zero
+#     fragments, so `decompose` is the on-ramp — lives in the tool docstring and
+#     the README, which costs no per-session tokens.
+# The ratchet intent is unchanged: trim back DOWN when the next diet lands.
+_BUDGET_TOKENS = 15_600
 
 
 def _is_tool_decorated(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:

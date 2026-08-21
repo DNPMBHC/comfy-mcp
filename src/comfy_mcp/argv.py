@@ -4,7 +4,8 @@ Leaf module over :mod:`comfy_mcp.errors`: it owns the shared argument-injection
 and OS-limit defenses (``_reject_nul``, ``_reject_option_like``,
 ``_reject_nul_deep``, ``_guard_arg_len``, ``_encode_argv``,
 ``_bounded_timeout``, ``_clip_for_error``) plus every per-domain guard built on
-top of them — ``_guard_workflow_path``, ``_guard_prompt_id``,
+top of them — ``_guard_workflow_path``, ``_guard_blueprint_path``,
+``_guard_fragment_name``, ``_guard_lib_dir``, ``_guard_prompt_id``,
 ``_guard_download_id``, ``_guard_extra_args``, ``_guard_version``,
 ``_guard_node_names``, ``_guard_log_port`` / ``_render_bad_port``,
 ``_guard_model_relative_path`` / ``_guard_model_filename``, and
@@ -162,9 +163,12 @@ def _reject_option_like(label: str, value: str, expected: str = "") -> str:
 #
 # The full set it covers, all of them through :func:`_guard_arg_len`:
 # ``run_workflow`` / ``validate_workflow`` / the four other ``workflow_path``
-# tools, ``download_model``'s ``relative_path`` and ``filename``,
-# ``fetch_template``'s / ``emit_partner_workflow``'s / ``partner_generate``'s
-# ``out_path``, ``fetch_outputs``'s and ``vary_workflow``'s ``out_dir``, each
+# tools, ``workflow_compose``'s ``blueprint_path`` / ``name`` / ``lib_dir`` /
+# ``out_path`` (and its ``workflow_path`` / ``object_info_path``, via
+# :func:`_guard_workflow_path`), ``download_model``'s ``relative_path`` and
+# ``filename``, ``fetch_template``'s / ``emit_partner_workflow``'s /
+# ``partner_generate``'s ``out_path``, ``fetch_outputs``'s and
+# ``vary_workflow``'s ``out_dir``, each
 # entry of ``upload_file``'s ``paths``, and ``search_models``' ``folder``.
 # ``download_model``'s ``url`` is the one path-adjacent value with a ceiling of
 # its own (:data:`_MAX_URL_LEN`), passed to the same helper as an explicit
@@ -322,6 +326,96 @@ def _guard_workflow_path(workflow_path: str, *, frontend: bool = False) -> str:
     _reject_option_like("workflow_path", workflow_path, expected=expected)
     _reject_nul("workflow_path", workflow_path)
     return workflow_path
+
+
+def _guard_blueprint_path(blueprint_path: str) -> str:
+    """Run the shared argv guards on a ``blueprint_path`` tool argument.
+
+    ``workflow_compose``'s ``action="compose"`` input. A sibling of
+    :func:`_guard_workflow_path` rather than a reuse of it, for the reason that
+    helper's own ``frontend`` flag exists: the wording names the format the
+    caller has to supply, and this one is YAML — ``comfy workflow compose``
+    reads it with ``yaml.safe_load`` and reports ``blueprint_invalid_yaml`` on a
+    workflow JSON handed over by mistake. Pointing that caller at "a workflow
+    JSON file" would name the wrong file entirely.
+
+    A bare POSITIONAL (``workflow compose <blueprint>``), so
+    :func:`_reject_option_like` here is mandatory injection defence, not
+    hygiene — a dash-leading value would be read as an option and shift
+    ``--out`` / ``--lib`` up a slot.
+
+    LENGTH first, then shape, then NUL — the module's fixed order; see
+    :func:`_guard_arg_len` for why size is reported before anything that echoes
+    the value.
+    """
+    _guard_arg_len("blueprint_path", blueprint_path)
+    _reject_option_like(
+        "blueprint_path",
+        blueprint_path,
+        expected=(
+            "a path to a blueprint YAML file (prefix a dash-leading name with './')"
+        ),
+    )
+    _reject_nul("blueprint_path", blueprint_path)
+    return blueprint_path
+
+
+def _guard_fragment_name(name: str) -> str:
+    """Run the shared argv guards on a ``workflow_compose`` fragment ``name``.
+
+    Deliberately the three shared primitives and NOTHING else — no path
+    narrowing, unlike :func:`_guard_model_filename`, which this otherwise
+    resembles. comfy-cli's ``fragment show`` / ``fragment validate`` take
+    "fragment name (looked up in ``--lib``) or path to .json" and resolve the
+    two through ``resolve_fragment_name``, so BOTH spellings are the documented
+    contract: refusing a separator here would refuse
+    ``name="other/lib/blend.json"``, which the engine accepts. That is the
+    ``download_model`` ``filename`` case inverted — there a bare name is the
+    whole contract and a separator escapes the directory ``relative_path``
+    pinned down, so narrowing is the guard; here narrowing would remove
+    capability the engine offers.
+
+    It is also ``decompose``'s optional ``--name``, where the engine slugs the
+    value through ``_slug_name`` (``[^A-Za-z0-9]+`` → ``_``) before using it as
+    a filename — so a traversal-shaped value cannot survive into a path on that
+    call either, and the guard has nothing to add beyond argv safety.
+
+    A bare POSITIONAL on ``show``/``validate`` (mandatory injection defence)
+    and a ``--name`` option value on ``decompose`` (hygiene); one guard covers
+    both, per :func:`_reject_option_like`'s split.
+    """
+    _guard_arg_len("name", name)
+    _reject_option_like(
+        "name",
+        name,
+        expected=(
+            "a fragment name (e.g. 'upscale') or a path to a fragment .json "
+            "(prefix a dash-leading name with './')"
+        ),
+    )
+    _reject_nul("name", name)
+    return name
+
+
+def _guard_lib_dir(lib_dir: str) -> str:
+    """Run the shared argv guards on a ``workflow_compose`` ``lib_dir`` argument.
+
+    The fragment library directory, forwarded as ``--lib``. Guarded like
+    ``vary_workflow``'s ``out_dir``: an option VALUE, so the leading-dash check
+    is hygiene rather than injection defence, and a directory this server never
+    opens itself, so there is no shape check to make beyond argv safety —
+    comfy-cli resolves it with ``Path(...).expanduser()`` and reports
+    ``fragment_lib_not_found`` when it is not a directory, which is a better
+    answer than any guess this side could make.
+    """
+    _guard_arg_len("lib_dir", lib_dir)
+    _reject_option_like(
+        "lib_dir",
+        lib_dir,
+        expected="a directory path (prefix a dash-leading name with './')",
+    )
+    _reject_nul("lib_dir", lib_dir)
+    return lib_dir
 
 
 # Generous ceiling on a `prompt_id`'s length. Real ids are the server's UUIDs

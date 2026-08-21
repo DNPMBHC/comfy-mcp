@@ -11380,6 +11380,262 @@ def vary_workflow(
     return _run_comfy(*args, timeout=120.0)
 
 
+_COMPOSE_ACTIONS = ("compose", "decompose", "list", "show", "validate")
+
+# Which actions read which param. Five tables rather than one because the five
+# verbs genuinely differ in shape — `compose` takes a blueprint, `decompose` a
+# workflow, `show`/`validate` a fragment name — and REJECT LOUDLY (the `job` /
+# `download` policy) needs to name the actions that DO take a param it is
+# refusing. `lib_dir` has no table: every action forwards `--lib`, so there is
+# nothing to reject.
+_COMPOSE_ACTIONS_TAKING_BLUEPRINT = ("compose",)
+_COMPOSE_ACTIONS_TAKING_WORKFLOW = ("decompose",)
+# "decompose" takes `name` as an OPTIONAL `--name` override; the other two
+# require it as a bare positional. Kept in one table because the question this
+# answers is "may the caller pass it at all", and the required-ness check below
+# consults `_COMPOSE_ACTIONS_REQUIRING_NAME` instead.
+_COMPOSE_ACTIONS_TAKING_NAME = ("show", "validate", "decompose")
+_COMPOSE_ACTIONS_REQUIRING_NAME = ("show", "validate")
+_COMPOSE_ACTIONS_TAKING_OUT = ("compose", "decompose")
+_COMPOSE_ACTIONS_TAKING_OBJECT_INFO = ("decompose",)
+
+# The comfy-cli verb each action's degrade checks, pinned as a table for the
+# reason `_DOWNLOAD_ACTION_VERB` gives: a sixth action cannot reach the dispatch
+# without also declaring which verb its own capability check reads. The three
+# `fragment` actions all degrade against the SUB-TYPER name — a comfy-cli
+# predating this group has no `fragment` command at all, so Click's usage error
+# names `fragment`, never `ls`/`show`/`validate`.
+_COMPOSE_ACTION_VERB = {
+    "compose": "compose",
+    "decompose": "decompose",
+    "list": "fragment",
+    "show": "fragment",
+    "validate": "fragment",
+}
+
+
+def _compose_verb_unsupported(
+    exc: ComfyCliError, verb: str, *caller_values: str
+) -> dict[str, Any] | None:
+    """The capability-gap degrade for a ``workflow <verb>`` this comfy-cli lacks.
+
+    Returns the ``{"error": ..., "unsupported": True}`` shape
+    :func:`_freshness_report` established, or ``None`` when *exc* is any other
+    failure and must be re-raised untouched — the same contract as
+    :func:`_download_verb_unsupported`, and factored out for the same reason:
+    five actions share it, so an inlined copy per branch could drift.
+
+    Unlike that one, this degrade REPORTS A REAL LOST CAPABILITY. The
+    fragment/compose group ships in comfy-cli 1.16.0, ABOVE this repo's floor
+    (:data:`_MIN_COMFY_CLI`), so a fully compliant 1.14.0 install legitimately
+    lacks it — this is the common path on such a machine, not the edge case the
+    download degrade guards. The floor deliberately does not move for it: see
+    :data:`_MIN_COMFY_CLI`, which forbids raising it for a verb that can degrade
+    per call, precisely so the rest of this tool surface keeps working on 1.14.
+
+    ``1.16.0`` is written out rather than interpolated from
+    :data:`_MIN_COMFY_CLI_STR`: that constant is the FLOOR, and interpolating it
+    would tell the caller the verbs need 1.14.0 — the release they are missing
+    FROM. Same reasoning as :func:`_download_verb_unsupported` and
+    ``node_dependencies``.
+
+    *caller_values* is the caller's own argument strings, discounted the way
+    ``node_dependencies`` discounts ``pack`` / ``registry_id``: ``compose`` /
+    ``decompose`` / ``fragment show`` all take a caller-supplied bare
+    positional, and :func:`argv._guard_fragment_name` deliberately permits
+    separators and dots, so a Click usage error echoing one back could otherwise
+    carry the parser's own phrase. Splatted rather than fixed-arity because the
+    five actions pass different subsets.
+    """
+    if not clitext._is_missing_verb_error(
+        exc, verb
+    ) or clitext._phrase_is_only_the_caller_s(
+        exc,
+        clitext._MISSING_VERB_RE_TEMPLATE.format(verb=re.escape(verb)),
+        *caller_values,
+    ):
+        return None
+    return {
+        "error": (
+            f"workflow_compose unavailable: the installed comfy-cli does not "
+            f"support 'comfy workflow {verb}' (the fragment/compose verbs ship "
+            "in 1.16.0 and newer). Nothing else is affected — the other "
+            "workflow tools still work. Update comfy-cli to build graphs from "
+            "fragments."
+        ),
+        "unsupported": True,
+    }
+
+
+@mcp.tool()
+def workflow_compose(
+    action: str = "compose",
+    blueprint_path: str = "",
+    workflow_path: str = "",
+    name: str = "",
+    lib_dir: str = "",
+    out_path: str = "",
+    object_info_path: str = "",
+) -> Any:
+    """BUILD a new workflow from reusable fragments -- the only authoring tool here.
+
+    Wraps `comfy workflow compose`/`decompose`/`fragment ...` (comfy-cli
+    1.16.0+). Every other workflow tool EDITS an existing graph; this one
+    composes nodes and edges. `action`:
+    - "decompose" -> project `workflow_path` into a reusable fragment (loaders
+      become typed inputs, widgets named params). START HERE: no fragment
+      library ships with comfy-cli, so `compose` has nothing to build from
+      until you make one. A frontend-format file (what `fetch_template`
+      writes) is flattened to API format first, which NEEDS a running ComfyUI
+      or `object_info_path` pointing at an object_info.json dump.
+    - "compose" -> compile `blueprint_path` (a YAML pipeline of fragments,
+      `$alias.output` wiring) into a runnable API-format workflow. Read
+      `written` for the files; `out` is null on a chunked fan-out.
+    - "list" / "show" / "validate" -> the library's fragments, one fragment's
+      ports, or whether a fragment file is well-formed.
+
+    `lib_dir` sets the library for every action; UNSET means comfy-cli's own
+    `./fragments` relative to its cwd -- which an MCP client does not control,
+    so PASS IT EXPLICITLY. `name` is required by "show"/"validate", optional on
+    "decompose". Params for other actions are rejected, not ignored. Then
+    `validate_workflow` before `run_workflow`. Too-old comfy-cli: `{"error",
+    "unsupported": True}` instead of raising.
+    """
+    # Silent in the docstring, needed by a maintainer: comfy-cli embeds a
+    # `_meta` provenance block (`schema: "compose/1"`, the blueprint's abspath,
+    # and per-item maps on a foreach) into every workflow `compose` writes, and
+    # `comfy run` strips it before submitting — so the composed file is
+    # runnable as-is and the block is not this server's to manage. `list`'s
+    # payload also carries `lib`/`count` alongside `fragments`/`errors`, and a
+    # lib_dir that does not EXIST is comfy-cli's `fragment_lib_not_found` error
+    # rather than an empty list — an empty directory is the empty answer.
+    if action not in _COMPOSE_ACTIONS:
+        raise ComfyCliError(
+            f"invalid workflow_compose action: {action!r} — expected one of "
+            f"{', '.join(repr(item) for item in _COMPOSE_ACTIONS)}."
+        )
+
+    wants_blueprint = action in _COMPOSE_ACTIONS_TAKING_BLUEPRINT
+    wants_workflow = action in _COMPOSE_ACTIONS_TAKING_WORKFLOW
+    wants_name = action in _COMPOSE_ACTIONS_TAKING_NAME
+    wants_out = action in _COMPOSE_ACTIONS_TAKING_OUT
+    wants_object_info = action in _COMPOSE_ACTIONS_TAKING_OBJECT_INFO
+
+    # Missing a REQUIRED param is named by action AND param, the way `download`
+    # does it — deliberately not left to fall through to a guard's generic
+    # empty-value message, which would not say which action needed it.
+    if wants_blueprint and not blueprint_path:
+        raise ComfyCliError(
+            f"workflow_compose(action={action!r}) requires blueprint_path, but "
+            "none was given."
+        )
+    if wants_workflow and not workflow_path:
+        raise ComfyCliError(
+            f"workflow_compose(action={action!r}) requires workflow_path, but "
+            "none was given."
+        )
+    if action in _COMPOSE_ACTIONS_REQUIRING_NAME and not name:
+        raise ComfyCliError(
+            f"workflow_compose(action={action!r}) requires name, but none was given."
+        )
+    # Supplied-but-ignored params are REJECT LOUDLY, not silently dropped: a
+    # call that looks like it composed into `out_path` but wrote elsewhere is
+    # exactly the silent-drop failure the `job` / `download` policy guards.
+    # Ordered blueprint -> workflow -> name -> out -> object_info, matching the
+    # signature, so two wrong params report the first one a reader would look at.
+    for supplied, label, table in (
+        (blueprint_path, "blueprint_path", _COMPOSE_ACTIONS_TAKING_BLUEPRINT),
+        (workflow_path, "workflow_path", _COMPOSE_ACTIONS_TAKING_WORKFLOW),
+        (name, "name", _COMPOSE_ACTIONS_TAKING_NAME),
+        (out_path, "out_path", _COMPOSE_ACTIONS_TAKING_OUT),
+        (
+            object_info_path,
+            "object_info_path",
+            _COMPOSE_ACTIONS_TAKING_OBJECT_INFO,
+        ),
+    ):
+        if supplied and action not in table:
+            raise ComfyCliError(
+                f"workflow_compose(action={action!r}) does not take {label} — "
+                f"{label} is used by action in "
+                f"{', '.join(repr(item) for item in table)}."
+            )
+
+    # ALL params validated before ANY dispatch, so a rejection never costs a
+    # spawn — `download`'s shape. Guard order follows the signature, and each
+    # value's own size check rides inside its guard (see `argv._guard_arg_len`
+    # on why size is per-value rather than hoisted).
+    args = ["workflow"]
+    if wants_blueprint:
+        args += [action, argv._guard_blueprint_path(blueprint_path)]
+    elif wants_workflow:
+        # `frontend=False`: comfy-cli's `decompose` takes API format OR frontend
+        # format (it converts the latter), so the wording that demands a
+        # frontend export would name a constraint this verb does not have.
+        args += [action, argv._guard_workflow_path(workflow_path)]
+    else:
+        # `list` -> `fragment ls`; the CLI spells it `ls` while this surface says
+        # "list", matching `nodes(action="list")`. An MCP-surface SPELLING, not a
+        # rename: the CLI's own name still reaches it unchanged in argv.
+        args += ["fragment", "ls" if action == "list" else action]
+        if action != "list":
+            args.append(argv._guard_fragment_name(name))
+    if wants_name and action == "decompose" and name:
+        args += ["--name", argv._guard_fragment_name(name)]
+    if wants_out and out_path:
+        # Inlined rather than a `_guard_out_path` helper, matching
+        # `fetch_template` / `partner_generate` / `vary_workflow`: the existing
+        # out-path sites each inline these three, so a fourth should not be the
+        # one to invent the abstraction.
+        argv._guard_arg_len("out_path", out_path)
+        argv._reject_option_like(
+            "out_path",
+            out_path,
+            expected="a file path (prefix a dash-leading name with './')",
+        )
+        argv._reject_nul("out_path", out_path)
+        args += ["--out", out_path]
+    if lib_dir:
+        args += ["--lib", argv._guard_lib_dir(lib_dir)]
+    if wants_object_info and object_info_path:
+        # Inlined rather than `argv._guard_workflow_path`, even though the value
+        # is the same kind of JSON path: that helper reports every failure
+        # against the label `workflow_path`, so a dash-leading
+        # `object_info_path` would name the param the caller did NOT pass —
+        # on `decompose`, the one action taking both, actively misleading.
+        argv._guard_arg_len("object_info_path", object_info_path)
+        argv._reject_option_like(
+            "object_info_path",
+            object_info_path,
+            expected=(
+                "a path to an object_info.json dump "
+                "(prefix a dash-leading name with './')"
+            ),
+        )
+        argv._reject_nul("object_info_path", object_info_path)
+        args += ["--input", object_info_path]
+
+    try:
+        # 120s, matching `vary_workflow`: composing fans a blueprint into every
+        # graph it declares, and `decompose` may fetch `object_info` from a
+        # running ComfyUI first.
+        return _run_comfy(*args, timeout=120.0)
+    except ComfyCliError as exc:
+        degraded = _compose_verb_unsupported(
+            exc,
+            _COMPOSE_ACTION_VERB[action],
+            blueprint_path,
+            workflow_path,
+            name,
+            lib_dir,
+            out_path,
+            object_info_path,
+        )
+        if degraded is None:
+            raise
+        return degraded
+
+
 # How long the startup snapshot probe may hold up the handshake, WALL-CLOCK.
 # Enforced by `_apply_startup_instructions`' bounded thread join rather than by
 # the probe's own subprocess timeouts, because those do not compose into a

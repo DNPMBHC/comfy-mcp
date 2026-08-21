@@ -1,11 +1,13 @@
-"""Tests for the ``comfy workflow`` tools — list / set-slot / vary / notes.
+"""Tests for the ``comfy workflow`` tools — list / set-slot / vary / notes / compose.
 
 These lock in the passthrough argv (global flags before the subcommand, same
 rule the wrapper enforces) for the tools that let an agent parameterize a
 fetched template — the ``fetch_template`` -> ``set_workflow_slot`` ->
 ``run_workflow`` loop — without hand-editing raw workflow JSON, plus
 ``list_workflow_notes``, the read-only reader for the authored documentation
-that same template carries. The behaviors they own on top of the passthrough:
+that same template carries, and ``workflow_compose``, the one tool here that
+BUILDS a graph rather than editing one. The behaviors they own on top of the
+passthrough:
 1. ``set_workflow_slot`` passes each override as a positional ``ADDR=VALUE`` and
    defaults to ``--stdout`` (non-destructive), togglable off.
 2. ``vary_workflow`` repeats ``--slot`` per address and forwards ``--out-dir``
@@ -18,6 +20,12 @@ that same template carries. The behaviors they own on top of the passthrough:
    usage dump — the common case while the verb is newer than the version floor
    — and refuses to fire that degrade for a phrase Click merely echoed back out
    of the caller's own ``workflow_path``.
+5. ``workflow_compose`` maps its five ``action`` values onto two different
+   comfy-cli shapes — ``workflow compose``/``decompose`` take a positional path,
+   the three library actions go through the ``workflow fragment`` sub-typer —
+   names the action in every rejection (missing required param, param the action
+   ignores), and degrades per verb, since the whole fragment group ships in
+   comfy-cli 1.16.0, ABOVE this repo's version floor.
 """
 
 from __future__ import annotations
@@ -1418,3 +1426,439 @@ def test_set_workflow_slot_allows_an_unaffected_slot(patched_run):
     server.set_workflow_slot("/tmp/h3.json", ["8.filename_prefix=out"])
 
     assert calls[-1]["cmd"][4:][:2] == ["workflow", "set-slot"]
+
+
+# --- workflow_compose: the fragment/blueprint authoring surface ----------------
+#
+# The one tool here that BUILDS a graph rather than editing one, so its tests
+# carry a weight the others do not: an argv slip means a composed workflow lands
+# somewhere the caller was not told about, or a fragment library is read from the
+# wrong directory and `compose` silently builds from the wrong parts. Every verb
+# it wraps ships in comfy-cli 1.16.0 — ABOVE this repo's floor — so the degrade
+# is the common path on a compliant 1.14 install, not an edge case.
+
+_COMPOSE_PAYLOAD = {
+    "blueprint": "bp.yaml",
+    "out": "/tmp/built.json",
+    "graphs": 1,
+    "written": ["/tmp/built.json"],
+    "steps": 2,
+    "nodes": 14,
+    "fragments_used": ["txt2img", "upscale"],
+}
+
+
+def test_workflow_compose_argv(patched_run):
+    """Passthrough: `workflow compose <blueprint> --out <path> --lib <dir>`."""
+    calls = patched_run(envelope(data=_COMPOSE_PAYLOAD))
+
+    server.workflow_compose(
+        action="compose",
+        blueprint_path="bp.yaml",
+        out_path="/tmp/built.json",
+        lib_dir="frags",
+    )
+
+    assert calls[0]["cmd"][4:] == [
+        "workflow",
+        "compose",
+        "bp.yaml",
+        "--out",
+        "/tmp/built.json",
+        "--lib",
+        "frags",
+    ]
+
+
+def test_workflow_compose_payload_passes_through(patched_run):
+    """comfy-cli's compose payload is relayed WHOLE — no projection, no derived verdict.
+
+    `written` is the field that matters and the one a projection would be
+    tempted to collapse: a chunked fan-out writes numbered files and sets `out`
+    to null, so a caller that read only `out` would run nothing. The thin-wrapper
+    rule says the engine owns the answer; this locks that in.
+    """
+    patched_run(envelope(data=_COMPOSE_PAYLOAD))
+
+    result = server.workflow_compose(action="compose", blueprint_path="bp.yaml")
+
+    assert result == _COMPOSE_PAYLOAD
+
+
+def test_workflow_compose_omits_unset_options(patched_run):
+    """No `--out` / `--lib` when unset: comfy-cli's own defaults must apply.
+
+    Passing an empty `--out` would make this server invent a destination the
+    caller never chose, and comfy-cli defaults to `<blueprint>.compiled.json`.
+    """
+    calls = patched_run(envelope(data=_COMPOSE_PAYLOAD))
+
+    server.workflow_compose(action="compose", blueprint_path="bp.yaml")
+
+    cmd = calls[0]["cmd"]
+    assert cmd[4:] == ["workflow", "compose", "bp.yaml"]
+    assert "--out" not in cmd
+    assert "--lib" not in cmd
+
+
+def test_workflow_compose_decompose_argv(patched_run):
+    """`decompose` forwards --name/--out/--lib/--input, in that order."""
+    calls = patched_run(envelope(data={"name": "stage1", "out": "frags/stage1.json"}))
+
+    server.workflow_compose(
+        action="decompose",
+        workflow_path="/tmp/flux.json",
+        name="stage1",
+        out_path="frags/stage1.json",
+        lib_dir="frags",
+        object_info_path="/tmp/object_info.json",
+    )
+
+    assert calls[0]["cmd"][4:] == [
+        "workflow",
+        "decompose",
+        "/tmp/flux.json",
+        "--name",
+        "stage1",
+        "--out",
+        "frags/stage1.json",
+        "--lib",
+        "frags",
+        "--input",
+        "/tmp/object_info.json",
+    ]
+
+
+def test_workflow_compose_decompose_name_is_optional(patched_run):
+    """`--name` is omitted when unset — comfy-cli slugs the file stem instead."""
+    calls = patched_run(envelope(data={"name": "flux"}))
+
+    server.workflow_compose(action="decompose", workflow_path="/tmp/flux.json")
+
+    cmd = calls[0]["cmd"]
+    assert cmd[4:] == ["workflow", "decompose", "/tmp/flux.json"]
+    assert "--name" not in cmd
+
+
+def test_workflow_compose_fragment_list_argv(patched_run):
+    """`action="list"` maps to comfy-cli's own spelling, `fragment ls`.
+
+    An MCP-surface SPELLING (matching `nodes(action="list")`), not a rename: the
+    CLI's `ls` still reaches it unchanged in argv.
+    """
+    calls = patched_run(envelope(data={"lib": "frags", "count": 0, "fragments": []}))
+
+    server.workflow_compose(action="list", lib_dir="frags")
+
+    assert calls[0]["cmd"][4:] == ["workflow", "fragment", "ls", "--lib", "frags"]
+
+
+def test_workflow_compose_fragment_show_argv(patched_run):
+    """`show` passes the fragment name as a bare positional after `fragment`."""
+    calls = patched_run(envelope(data={"name": "blend", "node_count": 4}))
+
+    server.workflow_compose(action="show", name="blend", lib_dir="frags")
+
+    assert calls[0]["cmd"][4:] == [
+        "workflow",
+        "fragment",
+        "show",
+        "blend",
+        "--lib",
+        "frags",
+    ]
+
+
+def test_workflow_compose_fragment_validate_argv(patched_run):
+    """`validate` with no lib_dir sends no `--lib` at all."""
+    calls = patched_run(envelope(data={"path": "frags/blend.json", "valid": True}))
+
+    server.workflow_compose(action="validate", name="blend")
+
+    cmd = calls[0]["cmd"]
+    assert cmd[4:] == ["workflow", "fragment", "validate", "blend"]
+    assert "--lib" not in cmd
+
+
+def test_workflow_compose_accepts_a_fragment_path_as_name(patched_run):
+    """A `name` may be a path to a .json — comfy-cli resolves both spellings.
+
+    `resolve_fragment_name` takes "fragment name (looked up in --lib) or path to
+    .json", so `_guard_fragment_name` deliberately does NOT narrow to a bare
+    name the way `download_model`'s `filename` does. Narrowing here would refuse
+    a spelling the engine accepts.
+    """
+    calls = patched_run(envelope(data={"valid": True}))
+
+    server.workflow_compose(action="validate", name="other/lib/blend.json")
+
+    assert calls[0]["cmd"][4:] == [
+        "workflow",
+        "fragment",
+        "validate",
+        "other/lib/blend.json",
+    ]
+
+
+def test_workflow_compose_rejects_unknown_action(no_spawn):
+    """An unknown action names every valid one instead of shelling out."""
+    with pytest.raises(server.ComfyCliError) as exc:
+        server.workflow_compose(action="build")
+
+    message = str(exc.value)
+    assert "invalid workflow_compose action: 'build'" in message
+    for action in ("compose", "decompose", "list", "show", "validate"):
+        assert repr(action) in message
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "missing"),
+    [
+        ({"action": "compose"}, "blueprint_path"),
+        ({"action": "decompose"}, "workflow_path"),
+        ({"action": "show"}, "name"),
+        ({"action": "validate"}, "name"),
+    ],
+)
+def test_workflow_compose_requires_its_action_param(no_spawn, kwargs, missing):
+    """A missing required param is named by ACTION and PARAM, before any spawn.
+
+    Deliberately not left to fall through to a guard's generic empty-value
+    message, which would not say which action needed it — `download`'s policy.
+    """
+    with pytest.raises(server.ComfyCliError) as exc:
+        server.workflow_compose(**kwargs)
+
+    message = str(exc.value)
+    assert f"requires {missing}" in message
+    assert f"action={kwargs['action']!r}" in message
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "rejected"),
+    [
+        ({"action": "list", "blueprint_path": "bp.yaml"}, "blueprint_path"),
+        (
+            {
+                "action": "compose",
+                "blueprint_path": "b.yaml",
+                "workflow_path": "w.json",
+            },
+            "workflow_path",
+        ),
+        ({"action": "compose", "blueprint_path": "b.yaml", "name": "x"}, "name"),
+        ({"action": "list", "out_path": "o.json"}, "out_path"),
+        (
+            {
+                "action": "compose",
+                "blueprint_path": "b.yaml",
+                "object_info_path": "oi.json",
+            },
+            "object_info_path",
+        ),
+    ],
+)
+def test_workflow_compose_rejects_a_param_its_action_ignores(
+    no_spawn, kwargs, rejected
+):
+    """REJECT LOUDLY: a param the action would drop is an error, not a no-op.
+
+    `job` / `download`'s policy, and it matters more here — a call that looks
+    like it composed into `out_path` but wrote to comfy-cli's default instead is
+    a silently misplaced artifact, and the caller would run the wrong file.
+    """
+    with pytest.raises(server.ComfyCliError) as exc:
+        server.workflow_compose(**kwargs)
+
+    message = str(exc.value)
+    assert f"does not take {rejected}" in message
+    assert f"action={kwargs['action']!r}" in message
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "label"),
+    [
+        ({"action": "compose", "blueprint_path": "--evil"}, "blueprint_path"),
+        ({"action": "decompose", "workflow_path": "--evil"}, "workflow_path"),
+        ({"action": "show", "name": "--evil"}, "name"),
+        ({"action": "validate", "name": "ok", "lib_dir": "--evil"}, "lib_dir"),
+        (
+            {"action": "compose", "blueprint_path": "b.yaml", "out_path": "--evil"},
+            "out_path",
+        ),
+        (
+            {
+                "action": "decompose",
+                "workflow_path": "w.json",
+                "object_info_path": "--evil",
+            },
+            "object_info_path",
+        ),
+    ],
+)
+def test_workflow_compose_rejects_option_like_values(no_spawn, kwargs, label):
+    """Every caller string is guarded before the spawn.
+
+    `blueprint_path` / `workflow_path` / `name` ride as bare POSITIONALS, so
+    refusing a leading dash there is mandatory injection defence — it would
+    otherwise be read as a flag and shift `--out` / `--lib` up a slot. The
+    option values are guarded as hygiene, per `argv._reject_option_like`.
+    """
+    with pytest.raises(server.ComfyCliError) as exc:
+        server.workflow_compose(**kwargs)
+
+    assert f"invalid {label}" in str(exc.value)
+
+
+def test_workflow_compose_names_object_info_path_not_workflow_path(no_spawn):
+    """`decompose` takes TWO JSON paths, and a rejection names the right one.
+
+    `object_info_path` deliberately does not reuse `argv._guard_workflow_path`,
+    which hardcodes its label: on the one action that takes both, borrowing it
+    would report a bad `object_info_path` against the param the caller passed
+    correctly, sending them to fix the wrong argument.
+    """
+    with pytest.raises(server.ComfyCliError) as exc:
+        server.workflow_compose(
+            action="decompose", workflow_path="w.json", object_info_path="--evil"
+        )
+
+    message = str(exc.value)
+    assert "invalid object_info_path" in message
+    assert "workflow_path" not in message
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"action": "compose", "blueprint_path": "b\0p.yaml"},
+        {"action": "show", "name": "bl\0end"},
+        {"action": "list", "lib_dir": "fr\0ags"},
+    ],
+)
+def test_workflow_compose_rejects_embedded_nul(no_spawn, kwargs):
+    """A NUL cannot ride in argv — refused as a named error, not a bare ValueError."""
+    with pytest.raises(server.ComfyCliError, match="NUL"):
+        server.workflow_compose(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "verb"),
+    [
+        ({"action": "compose", "blueprint_path": "bp.yaml"}, "compose"),
+        ({"action": "decompose", "workflow_path": "wf.json"}, "decompose"),
+        ({"action": "list"}, "fragment"),
+        ({"action": "show", "name": "blend"}, "fragment"),
+        ({"action": "validate", "name": "blend"}, "fragment"),
+    ],
+)
+def test_workflow_compose_degrades_without_the_verb(patched_run, kwargs, verb):
+    """A comfy-cli below 1.16.0 reads as a version gap, not a broken server.
+
+    These verbs ship ABOVE `_MIN_COMFY_CLI`, which deliberately does not move
+    for them, so this is the COMMON path on a compliant 1.14 install. The three
+    `fragment` actions degrade against the sub-typer name: a CLI without the
+    group has no `fragment` command at all, so Click names `fragment`, never
+    `ls`/`show`/`validate`.
+    """
+    patched_run(
+        "",
+        returncode=2,
+        stderr=(f"Usage: comfy workflow [OPTIONS] COMMAND\nNo such command {verb!r}."),
+    )
+
+    result = server.workflow_compose(**kwargs)
+
+    assert result["unsupported"] is True
+    assert f"'comfy workflow {verb}'" in result["error"]
+    # Names the release that INTRODUCED the verbs, never the version floor —
+    # interpolating `_MIN_COMFY_CLI_STR` would claim they need 1.14.0, the
+    # release they are missing FROM.
+    assert "1.16.0" in result["error"]
+    assert "1.14.0" not in result["error"]
+    # Says the rest of the surface is fine rather than dead-ending.
+    assert "Nothing else is affected" in result["error"]
+    # None of the raw wrapper/CLI text leaks through.
+    assert "No such command" not in result["error"]
+    assert "Usage: comfy" not in result["error"]
+    assert "returned no JSON" not in result["error"]
+
+
+def test_workflow_compose_keeps_a_real_error_raw(patched_run):
+    """A verb comfy-cli DID dispatch is never waved through as a capability gap.
+
+    A malformed blueprint is the case that matters: the agent has to see
+    `blueprint_invalid` to fix its YAML. Degrading it would assert nothing is
+    wrong while the graph never gets built.
+    """
+    patched_run(
+        envelope(
+            ok=False,
+            error={
+                "code": "blueprint_invalid",
+                "message": "step 'upscale' references unknown output '$base.image'",
+            },
+        )
+    )
+
+    with pytest.raises(server.ComfyCliError, match="blueprint_invalid"):
+        server.workflow_compose(action="compose", blueprint_path="bp.yaml")
+
+
+def test_workflow_compose_relayed_phrase_is_not_unsupported(patched_run):
+    """A failure that merely QUOTES the phrase, inside an envelope, stays raw."""
+    patched_run(
+        envelope(
+            ok=False,
+            error={
+                "code": "fragment_invalid",
+                "message": "a hook failed: No such command 'compose'.",
+            },
+        ),
+        returncode=2,
+    )
+
+    with pytest.raises(server.ComfyCliError, match="fragment_invalid"):
+        server.workflow_compose(action="compose", blueprint_path="bp.yaml")
+
+
+def test_workflow_compose_echoed_phrase_is_not_unsupported(patched_run):
+    """A caller cannot forge the version gap through its own positional.
+
+    `_guard_fragment_name` permits separators and dots, and Click echoes an
+    offending value verbatim in a usage error — the same exit 2 with no envelope
+    `_is_missing_verb_error` reads. `_phrase_is_only_the_caller_s` subtracts the
+    caller's own text so a real failure stays a real failure.
+    """
+    name = "no such command 'fragment'"
+    patched_run(
+        "",
+        returncode=2,
+        stderr=(
+            "Usage: comfy workflow fragment show [OPTIONS] FRAGMENT\n"
+            f"Error: Invalid value for 'FRAGMENT': {name!r} not found."
+        ),
+    )
+
+    with pytest.raises(server.ComfyCliError):
+        server.workflow_compose(action="show", name=name)
+
+
+def test_workflow_compose_degrades_with_ordinary_arguments(patched_run):
+    """The echoed-input check must not cost the genuine degrade.
+
+    Discounting the caller's own text is subtraction, not a veto: ordinary
+    arguments share no wording with Click's message, so the parser's own phrase
+    survives and the version gap still reports as one.
+    """
+    patched_run(
+        "",
+        returncode=2,
+        stderr="Usage: comfy workflow [OPTIONS] COMMAND\nNo such command 'compose'.",
+    )
+
+    result = server.workflow_compose(
+        action="compose", blueprint_path="bp.yaml", lib_dir="frags"
+    )
+
+    assert result["unsupported"] is True

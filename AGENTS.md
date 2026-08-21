@@ -17,60 +17,61 @@ Hard guardrails — a PR breaking any of these should be rejected:
 
 - **Every tool is a `comfy --json --where local` passthrough.** New functionality belongs in
   comfy-cli, exposed here as a thin `_run_comfy` call. A feature that can't be a `comfy`
-  subcommand needs a comfy-cli change, not a workaround here.
+  subcommand needs a comfy-cli change, not a workaround here. Graph AUTHORING is the case to
+  watch: `workflow_compose` wraps 1.16.0's fragment/blueprint verbs as PURE single calls and
+  **never** grows node/edge emission, blueprint YAML parsing, fragment-library bookkeeping or
+  `object_info` flattening of its own — the mutation ceiling stays `set_workflow_slot`'s
+  `ADDR=VALUE` on a slot that already exists.
 - **No HTTP client.** This server never talks to ComfyUI (or anything else) over HTTP
   directly — no `httpx`/`requests`/`aiohttp`/`urllib` calls to a server. comfy-cli owns all
   I/O with ComfyUI (reaching a *local* process means shelling out to `comfy`, never opening
   a socket).
 - **No code from the cloud MCP.** Do not copy code, patterns, or dependencies from
   `Comfy-Org/comfy-cloud-mcp-server` — a multi-tenant HTTP service with per-session state,
-  signed URLs, analytics, and a cloud API client, none of which apply here. This repo is
-  local-only, single-process, with no filesystem/multi-tenancy concerns to design around.
+  signed URLs, analytics, and a cloud API client, none of which apply to a local-only,
+  single-process server with no filesystem/multi-tenancy concerns to design around.
 
-A tool may COMPOSE more than one passthrough when the value is in the sequence, not new
-logic — `fetch_template` runs `templates fetch` then `validate`, telling the caller whether
-the template it wrote can run; `download_model` submits `model download --background` then
-polls `model download-status` so a multi-GB transfer doesn't hold the MCP request open. That
-stays inside the rule: every call goes through `_run_comfy`, the verdict is comfy-cli's own,
-no product behavior is added. Breaching it means deriving the answer here (parsing the
-graph, keeping a table of what is "supported") instead of asking the engine — e.g.
-`download_model` sizing the file on disk instead of reading its `status`. `install_node`
-composes for a different reason: `comfy node install` runs Manager's `cm-cli`, which a
-legacy clone under `custom_nodes/` can't provide, so it reads `comfy env`'s manager fields
-BEFORE the consent prompt rather than authorize third-party code on a call that can't
-succeed. It fails OPEN and shares `workflow_deps`' two helpers so the two can't drift, and
-reads its VERDICT from printed text (`_extract_install_failures`) — cm-cli prints a pack's
-failure before consulting `--exit-on-fail`, so a pack that never installed came back `ok:
-true` — on the standing of `_extract_saved_paths`: no envelope, so text is the only channel
-and the verdict is cm-cli's own sentence, matched one-directionally so a wording change
-regresses rather than fails every install. `workflow_deps` reads its answer off DISK because
-the engine leaves none — `comfy node deps-in-workflow` emits no envelope and REQUIRES an
-`--output` path — so the temp-file round trip is the contract, and the manifest goes back as
-written bar `failure_log._scrub_text` masking repo-URL credentials. `restart_comfyui`
-composes a THIRD pair: `comfy stop --port <p> --dry-run` / `comfy stop --port <p>` show who
-holds a leftover port to recycle — never a `psutil`/HTTP check; that verdict stays
-comfy-cli's.
+A tool may COMPOSE more than one passthrough when the value is in the sequence, not new logic
+— `fetch_template` runs `templates fetch` then `validate`, telling the caller whether the
+template it wrote can run; `download_model` submits `model download --background` then polls
+`model download-status` so a multi-GB transfer doesn't hold the MCP request open. That stays
+inside the rule: every call goes through `_run_comfy`, the verdict is comfy-cli's own, no
+product behavior is added. Breaching it means deriving the answer here (parsing the graph,
+keeping a table of what is "supported") instead of asking the engine — e.g. `download_model`
+sizing the file on disk instead of reading its `status`. `install_node` composes for a
+different reason: `comfy node install` runs Manager's `cm-cli`, which a legacy clone under
+`custom_nodes/` can't provide, so it reads `comfy env`'s manager fields BEFORE the consent
+prompt rather than authorize third-party code on a call that can't succeed. It fails OPEN and
+shares `workflow_deps`' two helpers so the two can't drift, and reads its VERDICT from printed
+text (`_extract_install_failures`) — cm-cli prints a pack's failure before consulting
+`--exit-on-fail`, so a pack that never installed came back `ok: true` — on the standing of
+`_extract_saved_paths`: no envelope, so text is the only channel and the verdict is cm-cli's
+own sentence, matched one-directionally so a wording change regresses rather than fails every
+install. `workflow_deps` reads its answer off DISK because the engine leaves none — `comfy
+node deps-in-workflow` emits no envelope and REQUIRES an `--output` path — so the temp-file
+round trip is the contract, and the manifest goes back as written bar
+`failure_log._scrub_text` masking repo-URL credentials. `restart_comfyui` composes a THIRD
+pair: `comfy stop --port <p> --dry-run` / `comfy stop --port <p>` show who holds a leftover
+port to recycle — never a `psutil`/HTTP check; that verdict stays comfy-cli's.
 
 The one thing that legitimately lives here rather than in comfy-cli is **MCP protocol
 surface** — capabilities comfy-cli can't express. Today that's the per-call confirmation on
 tools that can spend money, destroy local state, run third-party code, kill a process, or
 expose the machine: `partner_generate`, `run_template`, `run_workflow`,
-`switch_comfyui_version`, `install_node`, `update_comfyui` when `target="all"`, the
-`launch_comfyui`/`restart_comfyui` pair when `extra_args` would publish ComfyUI to the
-network, and again to kill an untracked server. comfy-cli owns the credit-spend interlock
-and the durable "always proceed" (`comfy generate consent always`); this server only raises
-the confirmation over MCP **elicitation** — the protocol's y/N prompt — then forwards the
-answer as `--yes`/`--allow-spend`, or (for the five the CLI doesn't gate at all) refuses to
-run the command. It stores no consent of its own — all share one fail-closed body,
-`_elicit_approval`; give a new gate its own `_ApprovalWording`, not a second copy. Adding
-*product* behavior here is still a guardrail breach; adapting comfy-cli's contract to an MCP
-primitive is this repo's job. Project anchoring (`_project_root`, `COMFY_PROJECT`, the
-`project` tool) is the same kind of adaptation: comfy-cli resolves its governing `project/1`
-by walking up from its own process cwd, assuming a persistent shell session an MCP client's
-arbitrary per-call cwd can't provide, so this server passes `cwd=` on its own spawns instead
-— the `status`/`init` verdicts stay entirely comfy-cli's own.
-
-The second MCP-surface capability is the startup **machine snapshot**
+`switch_comfyui_version`, `install_node`, `update_comfyui`, and the
+`launch_comfyui`/`restart_comfyui` pair — WHICH prompts WHEN is below. comfy-cli owns the
+credit-spend interlock and the durable "always proceed" (`comfy generate consent always`);
+this server only raises the confirmation over MCP **elicitation** — the protocol's y/N prompt
+— then forwards the answer as `--yes`/`--allow-spend`, or (for the five the CLI doesn't gate
+at all) refuses to run the command. It stores no consent of its own — all share one
+fail-closed body, `_elicit_approval`; give a new gate its own `_ApprovalWording`, not a
+second copy. Adding *product* behavior here is still a guardrail breach; adapting comfy-cli's
+contract to an MCP primitive is this repo's job. Project anchoring (`_project_root`,
+`COMFY_PROJECT`, the `project` tool) is the same kind of adaptation: comfy-cli resolves its
+governing `project/1` by walking up from its own process cwd, assuming a persistent shell
+session an MCP client's arbitrary per-call cwd can't provide, so this server passes `cwd=` on
+its own spawns instead — the `status`/`init` verdicts stay entirely comfy-cli's own. The
+second MCP-surface capability is the startup **machine snapshot**
 (`_machine_snapshot_block`): comfy-cli's own `hardware` payload, quoted verbatim into the
 handshake instructions, fail-open on any probe failure — no derived verdict, same guardrail.
 
@@ -111,7 +112,7 @@ under it — none imports `server`, so the dependency edges only ever point one 
 | `instructions.py` | the `INSTRUCTIONS` constant handed to `MCPServer(..., instructions=...)` — client-handshake text |
 | `errors.py` | `ComfyCliError`; the "nothing recorded to stop" detector; the `error.details` renderer + per-field char cap |
 | `clitext.py` | comfy-cli **human-output** parsing for verbs with no envelope — `Saved:`-block/install-failure extraction, `plain_ok` synthesis, missing-verb/-option probes, `install_node`'s per-pack verdict, echoed-argv forgery guards. Its extractors are the documented cm-cli contract (see architecture rule above) — move or edit byte-for-byte |
-| `argv.py` | argument-injection and OS-limit guards for every tool-facing string headed for `subprocess`: shared primitives plus per-domain guards (workflow path, prompt id, download id, extra args, version, node names, log port, model path/filename, upload paths) |
+| `argv.py` | argument-injection and OS-limit guards for every tool-facing string headed for `subprocess`: shared primitives plus per-domain guards (workflow path, blueprint path, fragment name, fragment-library dir, prompt id, download id, extra args, version, node names, log port, model path/filename, upload paths) |
 | `target.py` | remote-target resolution/redaction/provenance for run/job tools — `COMFYUI_URL`/`HOST`/`PORT` parsing, `--host`/`--port` forwarding, the local-only `download_model` refusal, and divergence notes on `system_stats`/`free_memory` so an agent doesn't gate a remote run on local numbers |
 | `params.py` | param/slot marshaling into comfy-cli argv for `generate`/`run-template`/`set-slot`/`vary`, incl. the structured slot machinery — `SlotOverride`/`SlotVariants` are this module's public TYPES (carve-out below) |
 | `cli.py` | the console script's own argv surface — the `--help` / `--version` text a HUMAN who types `comfy-mcp` in a terminal gets, plus the installed-metadata version lookup (`_version`) behind it. That lookup is the SINGLE answer to "which release is this?": `server._server_version` delegates to it for the handshake's `serverInfo.version`, so the string a client displays is the string the terminal prints |
@@ -193,8 +194,7 @@ it were already public:
   text. Credential-in-URL fixtures use `https://<user>:<pass>@host`: a bare `user:pass@`
   fails the secret-scanning diff gate, and a fake scheme documents a scrubber gap
   (`failure_log._URL_RE` needs `https?://`).
-- **No internal hostnames, IPs, or internal-only URLs** in code, comments, or commit
-  messages.
+- **No internal hostnames, IPs, or internal-only URLs** in code, comments, or commits.
 - **No internal-tracker references** in commits or PR titles/bodies — describe the change on
   its own terms.
 - Prefer environment variables and documented config over anything hardcoded.
