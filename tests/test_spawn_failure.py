@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import sys
 
 import pytest
 from conftest import _OK_STREAM, _RecordingCtx
@@ -49,6 +50,15 @@ _OVERSIZED = "SPAWN-FAILURE-MARKER-" * 200
 # range `surrogateescape` round-trips, so `os.fsencode` refuses it on any
 # UTF-8 POSIX host.
 _UNENCODABLE = "\ud800abc"
+
+# Windows encodes argv with `surrogatepass`, which ROUND-TRIPS a lone surrogate
+# instead of refusing it, so there is no `UnicodeEncodeError` to convert there —
+# `argv._encode_argv`'s docstring says the guard is deliberately a no-op on
+# Windows rather than wrong. The wrap these tests pin only has an input on POSIX.
+_needs_posix_fsencode = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="`os.fsencode` uses `surrogatepass` on Windows, so a lone surrogate encodes fine",
+)
 
 _E2BIG = OSError(errno.E2BIG, "Argument list too long")
 
@@ -106,7 +116,9 @@ def test_oversized_argv_records_a_spawn_failed_entry(patched_run, log_path):
         server.search_models(query=_OVERSIZED)
 
     (entry,) = [
-        json.loads(line) for line in log_path.read_text().splitlines() if line.strip()
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
     assert entry["kind"] == "spawn_failed"
     assert entry["exit_code"] is None  # there is no child to have reported one
@@ -141,6 +153,7 @@ def test_vanished_binary_is_converted_with_its_strerror(patched_run):
     assert "argument list" not in message
 
 
+@_needs_posix_fsencode
 def test_unencodable_argument_is_converted_not_raised(patched_run):
     """A lone surrogate fails as a tool error, naming the filesystem encoding.
 
@@ -158,6 +171,7 @@ def test_unencodable_argument_is_converted_not_raised(patched_run):
     assert "embedded NUL" not in message
 
 
+@_needs_posix_fsencode
 def test_unencodable_argument_message_stays_bounded(patched_run):
     """A long unencodable value is clipped out of the message like any other."""
     patched_run()
@@ -181,6 +195,7 @@ def test_async_runner_converts_a_spawn_failure(patched_async_run):
     assert "argument list and environment exceed" in str(excinfo.value)
 
 
+@_needs_posix_fsencode
 def test_async_runner_converts_an_unencodable_argument(patched_async_run):
     """Same real ``os.fsencode`` refusal as the sync path, on the async spawn."""
     patched_async_run()
@@ -206,6 +221,7 @@ def test_streaming_runner_converts_a_spawn_failure(patched_stream):
     assert "argument list and environment exceed" in str(excinfo.value)
 
 
+@_needs_posix_fsencode
 def test_streaming_runner_converts_an_unencodable_argument(patched_stream):
     """The unencodable branch on the streaming spawn, driven at the runner.
 

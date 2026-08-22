@@ -218,6 +218,14 @@ server. Pick your client.
 > folders, so an install there fails with `Operation not permitted` before anything runs. See
 > [Troubleshooting](#troubleshooting).
 
+> **On Windows**, `COMFY_BIN` points at the `comfy.exe` inside your venv's `Scripts` folder —
+> `C:\ComfyUI\venv\Scripts\comfy.exe`, not a `bin/comfy`. In a JSON config, backslashes must be
+> **doubled** (`"C:\\ComfyUI\\venv\\Scripts\\comfy.exe"`) or replaced with forward slashes
+> (`"C:/ComfyUI/venv/Scripts/comfy.exe"`), which Windows accepts too: a single backslash starts
+> a JSON escape, so `\C` makes the whole file unparseable and your client drops the server with
+> no visible error. In the `claude mcp add` form, drop the trailing `\` line continuations (a
+> POSIX-shell convention PowerShell doesn't read) and put the command on one line.
+
 ### Claude Code
 
 One command registers the server:

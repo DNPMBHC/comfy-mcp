@@ -123,3 +123,59 @@ jobs:
       - name: Tests
         if: steps.filter.outputs.code != 'false'
         run: pytest -q
+
+  # Windows is a first-class target for this server — ComfyUI's own portable
+  # build is the most common Windows install — and the platform splits this
+  # suite actually rides are real: `os.fsencode` uses `surrogatepass` there
+  # rather than `surrogateescape` (so an unencodable-argv guard has no input),
+  # process GROUPS do not exist (`os.killpg`/`SIGKILL` are absent, and
+  # `_kill_proc_tree` degrades to a direct `proc.kill()`), POSIX mode bits are
+  # meaningless, and a bare `read_text()` decodes with the ANSI code page
+  # instead of UTF-8. Every test that depends on one of those carries a
+  # `skipif(sys.platform == "win32")` naming which split it rides.
+  #
+  # DELIBERATELY a separate job rather than a third entry in `test`'s matrix:
+  # `test (py3.10)` / `test (py3.14)` are REQUIRED status contexts on main, and
+  # adding an `os` dimension would rename them to `test (ubuntu-latest, py3.10)`,
+  # so branch protection would wait forever for contexts that no longer report.
+  # This job's own context (`test (windows, py3.10)`) is NOT required, so a
+  # Windows-only break is visible without blocking unrelated work.
+  #
+  # One Python version, not both: this job exists to catch PLATFORM breaks, and
+  # a second interpreter on the same OS re-tests what `test` already covers on
+  # Linux. 3.10 is the floor — the version most likely to lack a newer stdlib
+  # portability fix the code silently leans on.
+  #
+  # No ruff steps here either: `ruff check` / `ruff format --check` read the same
+  # files and reach the same verdict on any OS, so running them twice buys
+  # nothing but a second place for a formatting nit to report.
+  test-windows:
+    name: test (windows, py${{ matrix.python-version }})
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # Single quotes are a POSIX-shell convention; PowerShell would pass them
+      # through as part of the argument, so pip would look for a package
+      # literally named `'.[dev]'`. Double quotes work in both shells, and this
+      # step runs under PowerShell (the `windows-latest` default).
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # No "Detect non-docs changes" gate: nothing requires this context, so a
+      # docs-only PR spending a couple of Windows minutes costs only minutes,
+      # and the branch that would skip it is one more place to get wrong.
+      - name: Tests
+        run: pytest -q

@@ -22,10 +22,9 @@ Hard guardrails — a PR breaking any of these should be rejected:
   **never** grows node/edge emission, blueprint YAML parsing, fragment-library bookkeeping or
   `object_info` flattening of its own — the mutation ceiling stays `set_workflow_slot`'s
   `ADDR=VALUE` on a slot that already exists.
-- **No HTTP client.** This server never talks to ComfyUI (or anything else) over HTTP
-  directly — no `httpx`/`requests`/`aiohttp`/`urllib` calls to a server. comfy-cli owns all
-  I/O with ComfyUI (reaching a *local* process means shelling out to `comfy`, never opening
-  a socket).
+- **No HTTP client.** This server never talks to ComfyUI (or anything else) over HTTP — no
+  `httpx`/`requests`/`aiohttp`/`urllib` calls to a server. comfy-cli owns all I/O with ComfyUI
+  (reaching a *local* process means shelling out to `comfy`, never opening a socket).
 - **No code from the cloud MCP.** Do not copy code, patterns, or dependencies from
   `Comfy-Org/comfy-cloud-mcp-server` — a multi-tenant HTTP service with per-session state,
   signed URLs, analytics, and a cloud API client, none of which apply to a local-only,
@@ -138,9 +137,10 @@ ruff check .              # lint
 ruff format --check .     # format check (run `ruff format .` to fix)
 ```
 
-CI (`.github/workflows/ci.yml`) runs all three on Python 3.10 and 3.14 every PR; get them
-green locally. Never add a `paths`/`paths-ignore` filter to its `pull_request` trigger —
-`test (py3.10)`/`test (py3.14)` must report every PR; it no-ops on Markdown-only changes.
+CI (`.github/workflows/ci.yml`) runs all three on 3.10 and 3.14 every PR, plus `test-windows`
+(pytest, 3.10; POSIX-only tests carry a `sys.platform` skip); get them green locally. Never
+add a `paths`/`paths-ignore` filter to `pull_request`, nor an `os` dimension to `test`'s
+matrix — `test (py3.10)`/`test (py3.14)` must report every PR. Markdown-only changes no-op.
 
 ## Tests
 

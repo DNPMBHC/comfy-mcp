@@ -43,10 +43,15 @@ Python ≥ 3.10. Everything runs through pip + setuptools.
 pip install -e '.[dev]'    # install with dev extras (pytest, ruff)
 ```
 
+On PowerShell, quote it `".[dev]"` instead — single quotes are a POSIX-shell
+convention, and PowerShell passes them through, so pip looks for a package
+literally named `'.[dev]'`. Double quotes work in both shells.
+
 ## Run the checks
 
 CI (`.github/workflows/ci.yml`) runs these three on Python 3.10 and 3.14 for
-every PR. Get them green locally before pushing:
+every PR, plus a Windows job that runs `pytest` alone. Get them green locally
+before pushing:
 
 ```bash
 pytest                     # run the tests

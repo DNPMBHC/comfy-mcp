@@ -375,6 +375,10 @@ def test_guard_arg_len_reads_the_module_constant_at_call_time(monkeypatch):
     assert argv._guard_arg_len("url", "u" * 9, 16) == "u" * 9
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="`os.fsencode` uses `surrogatepass` on Windows, so a lone surrogate encodes fine",
+)
 @pytest.mark.parametrize("call", _WORKFLOW_PATH_CALLS)
 def test_workflow_path_guard_rejects_an_unencodable_path(call, no_spawn):
     """Length is not the only way a string fails to reach `execve`.
@@ -386,6 +390,11 @@ def test_workflow_path_guard_rejects_an_unencodable_path(call, no_spawn):
     so it escapes as an internal error rather than a `ComfyCliError`. Covered
     for the whole path-shaped family in `_guard_arg_len`, so all six
     `workflow_path` tools are exercised here.
+
+    POSIX-only: Windows encodes argv with `surrogatepass`, which ROUND-TRIPS a
+    lone surrogate instead of refusing it, so there is no `UnicodeEncodeError`
+    for the guard to convert — `argv._encode_argv`'s docstring says the guard is
+    deliberately a no-op there rather than wrong.
     """
     with pytest.raises(server.ComfyCliError, match="cannot be encoded") as excinfo:
         call("/tmp/\ud800.json")

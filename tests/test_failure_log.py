@@ -74,8 +74,17 @@ def _entries(path) -> list[dict]:
 
     Parsing each line as JSON is itself an assertion: the log must be
     ``jq``-able, so a level/timestamp prefix leaking in would fail here.
+
+    ``encoding`` is explicit because the handler writes UTF-8 with
+    ``ensure_ascii=False`` (so the records carry non-ASCII verbatim), while a
+    bare ``read_text`` would decode with the locale's codec — cp1252/cp936 on
+    Windows, which raises on those bytes.
     """
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 # --- the opt-in switch -------------------------------------------------------
@@ -391,7 +400,7 @@ def test_scrub_arg_masks_userinfo_and_strips_query(log_path, fake_comfy):
     assert entry["message"].startswith(
         "comfy model download --url https://***@host/x failed"
     )
-    line = log_path.read_text()
+    line = log_path.read_text(encoding="utf-8")
     assert "tok" not in line
     assert "token=abc" not in line
 
@@ -590,8 +599,8 @@ def test_stream_tails_are_scrubbed_like_the_message(log_path):
     (entry,) = _entries(log_path)
     assert entry["stdout_tail"] == "fetching https://***@host/m.safetensors"
     assert entry["stderr_tail"] == "failed: https://***@h/x"
-    assert "tok" not in log_path.read_text()
-    assert "deadbeef" not in log_path.read_text()
+    assert "tok" not in log_path.read_text(encoding="utf-8")
+    assert "deadbeef" not in log_path.read_text(encoding="utf-8")
 
 
 def test_stream_tail_scrubs_a_url_straddling_the_tail_cut(log_path):
@@ -644,7 +653,7 @@ def test_stream_tail_drops_the_head_fragment_of_a_url_dense_capture(log_path):
 
     (entry,) = _entries(log_path)
     assert len(entry["stderr_tail"]) <= limit  # it DID take the early return
-    assert "user:tok" not in log_path.read_text()
+    assert "user:tok" not in log_path.read_text(encoding="utf-8")
     # Dropped, not masked — see the next test for why masking is not enough.
     # What follows the fragment is intact, so the tail still reads.
     assert entry["stderr_tail"].startswith("... https://h/a ")
@@ -672,7 +681,7 @@ def test_stream_tail_drops_a_head_fragment_clipped_past_its_query_marker(log_pat
 
     (entry,) = _entries(log_path)
     assert len(entry["stderr_tail"]) <= limit  # it DID take the early return
-    assert "SECRETVALUE" not in log_path.read_text()
+    assert "SECRETVALUE" not in log_path.read_text(encoding="utf-8")
     assert entry["stderr_tail"].startswith("... https://h/a ")
 
 
@@ -702,7 +711,7 @@ def test_stream_tail_masks_adjacent_urls_around_a_dropped_head_fragment(log_path
 
     (entry,) = _entries(log_path)
     assert len(entry["stderr_tail"]) <= limit  # it DID take the early return
-    written = log_path.read_text()
+    written = log_path.read_text(encoding="utf-8")
     for secret in ("user:tok", "<p2>", "<p3>", "<p4>"):
         assert secret not in written
     # The head fragment is dropped whole; the pair behind it survives, masked on

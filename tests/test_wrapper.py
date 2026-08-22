@@ -224,6 +224,30 @@ _needs_posix_exec = pytest.mark.skipif(
     reason="POSIX exec bit; which() needs a PATHEXT suffix on Windows",
 )
 
+# `os.fsencode` splits by platform: POSIX uses the `surrogateescape` error
+# handler, which REFUSES a lone surrogate, while Windows uses `surrogatepass`,
+# which round-trips it as three bytes. So on Windows there is no
+# `UnicodeEncodeError` for the guards to convert (`argv._encode_argv`'s docstring
+# says the guard is deliberately a no-op there), and a surrogate-encoded path
+# measures 3x what POSIX charges for it — both premises these tests pin.
+_needs_posix_fsencode = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="`os.fsencode` uses `surrogatepass` on Windows, so a lone surrogate encodes fine",
+)
+
+# Process GROUPS are a POSIX concept. `os.killpg` and `signal.SIGKILL` do not
+# exist on Windows at all, so `monkeypatch.setattr(server.os, "killpg", …)` would
+# raise `AttributeError` at setup and `signal.SIGKILL` at assertion time. The
+# code under test already accounts for it: `_kill_proc_tree` catches that
+# `AttributeError` and degrades to a direct `proc.kill()`, which reaches only the
+# direct child — a Windows tree kill needs `taskkill /T` or a Job Object and is
+# tracked separately (see `_kill_proc_tree`'s docstring). So the group behavior
+# these pin has no input on Windows rather than a different answer.
+_needs_process_groups = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="`os.killpg`/`signal.SIGKILL` are POSIX-only; the code degrades to proc.kill()",
+)
+
 # The spawn-site fixtures stub `shutil.which` to a fixed "/fake/comfy" (they
 # patch the shared module attribute), which would mask the real resolution the
 # two end-to-end tests below are checking. Captured at import, before any test
@@ -2031,6 +2055,7 @@ def test_upload_file_rejects_a_non_string_entry(no_spawn):
         _upload_file(["/tmp/ok.png", 42])
 
 
+@_needs_posix_fsencode
 def test_upload_file_rejects_an_unencodable_path(no_spawn):
     """A lone surrogate cannot be rendered into argv at all.
 
@@ -2043,6 +2068,7 @@ def test_upload_file_rejects_an_unencodable_path(no_spawn):
         _upload_file(["/tmp/ok.png", "/tmp/\ud800.png"])
 
 
+@_needs_posix_fsencode
 def test_upload_file_counts_undecodable_filename_bytes_as_subprocess_would(
     patched_async_run,
 ):
@@ -2052,6 +2078,10 @@ def test_upload_file_counts_undecodable_filename_bytes_as_subprocess_would(
     surrogate and `os.fsencode` renders it back as the SINGLE byte it came from.
     Measuring with `surrogatepass` instead would charge 3 bytes for each of
     those, over-counting such a path threefold and refusing a batch that fits.
+
+    POSIX-only because the two are the SAME thing on Windows: `os.fsencode` uses
+    `surrogatepass` there, so the premise below — a batch that fits one way and
+    not the other — cannot be constructed.
     """
     procs = patched_async_run(envelope(data={"uploaded": 1}))
     # One undecodable byte (0xFF) per character of name, at a size that fits
@@ -4504,6 +4534,7 @@ class _GroupKillProc:
         self.returncode = -9
 
 
+@_needs_process_groups
 def test_sync_timeout_kills_the_whole_process_group(monkeypatch):
     """A timed-out plain spawn reaps comfy-cli's DESCENDANTS, not just comfy-cli.
 
@@ -4539,6 +4570,7 @@ def test_sync_timeout_kills_the_whole_process_group(monkeypatch):
     assert "drained stderr" in str(exc.value)
 
 
+@_needs_process_groups
 def test_group_kill_is_not_gated_on_the_leader_still_running(monkeypatch):
     """A dead `comfy` does not mean a dead tree — kill the group regardless.
 
@@ -4567,6 +4599,7 @@ def test_group_kill_is_not_gated_on_the_leader_still_running(monkeypatch):
     assert signalled == [(proc.pid, signal.SIGKILL)]  # the survivors still die
 
 
+@_needs_process_groups
 def test_drain_second_timeout_keeps_the_longer_capture(monkeypatch):
     """A drain that times out too still reports what it managed to read.
 
@@ -4606,6 +4639,7 @@ def test_drain_second_timeout_keeps_the_longer_capture(monkeypatch):
     assert proc.timeouts == [1800.0, server._DRAIN_TIMEOUT]
 
 
+@_needs_process_groups
 def test_drain_non_timeout_failure_falls_back_to_the_first_capture(monkeypatch):
     """A drain that dies on a decode error has nothing better than the first read."""
 
